@@ -15,14 +15,17 @@
 #if PICO_CYW43_ARCH_POLL
 #define MEM_LIBC_MALLOC             1
 #else
-// MEM_LIBC_MALLOC is incompatible with non polling versions
+// MEM_LIBC_MALLOC is incompatível com versões non-polling
 #define MEM_LIBC_MALLOC             0
 #endif
+
+#define REQUEST_BUFFER_SIZE         2048
+#define MEMP_MEM_MALLOC             0   // Corrigido nome do define
 #define MEM_ALIGNMENT               4
-#define MEM_SIZE                    4000
+#define MEM_SIZE                    (32*1024)
 #define MEMP_NUM_TCP_SEG            32
 #define MEMP_NUM_ARP_QUEUE          10
-#define PBUF_POOL_SIZE              24
+#define PBUF_POOL_SIZE              32
 #define LWIP_ARP                    1
 #define LWIP_ETHERNET               1
 #define LWIP_ICMP                   1
