@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include "ssd1306.h"
 #include "font.h"
 #include "aht20.h"
 #include "bmp280.h"
@@ -15,6 +14,7 @@
 #include "buzzer.h"
 #include "matrixws.h"
 #include "leds_buttons.h"
+#include "display.h"
 
 // Controle de página para exibir uma leitura por vez
 volatile uint8_t pagina_atual = 0;
@@ -44,7 +44,7 @@ double calculate_altitude(double pressure)
 
 const char HTML_BODY[] =
     "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Estação Meteorológica</title>"
-    "<style>canvas{background:#fff;border:1px solid #ccc;}</style>"
+    "<style>canvas{background:#fff;border:1px solid #ccc;} h1{text-align:center;}</style>"
     "<script>"
     "let historico = [];"
     "let paginaAtual = null;"
@@ -52,7 +52,7 @@ const char HTML_BODY[] =
     "function atualizar() {"
     "  fetch('/estado').then(res => res.json()).then(data => {"
     "    document.getElementById('nome').innerText = data.nome;"
-    "    document.getElementById('valor').innerText = data.valor.toFixed(2);"
+    "    document.getElementById('valor').innerText = data.valor.toFixed(2) + ' ' + (data.unidade || '');"
     "    historico = data.historico;"
     "    desenharGrafico();"
     "    if (paginaAtual !== data.pagina || !camposPreenchidos) {"
@@ -89,10 +89,14 @@ const char HTML_BODY[] =
     "    .then(()=>{camposPreenchidos=false; setTimeout(atualizar,300);});"
     "  return false;"
     "}"
+    "function mudarPagina() {"
+    "  fetch('/pagina', {method:'POST'})"
+    "    .then(()=>{setTimeout(atualizar,300);});"
+    "}"
     "setInterval(atualizar, 1000);"
     "window.onload=atualizar;"
     "</script></head><body>"
-    "<h1>Estação Meteorológica</h1>"
+    "<h1 id='titulo'>Estação Meteorológica</h1>"
     "<div style='margin-top:30px; text-align:center;'>"
     "  <h2 id='nome'>--</h2>"
     "  <div style='font-size:2.5em; margin:20px 0;' id='valor'>--</div>"
@@ -103,6 +107,7 @@ const char HTML_BODY[] =
     "    <label>Offset: <input id='offset' type='number' step='any'></label><br>"
     "    <button type='submit'>Salvar</button>"
     "  </form>"
+    "  <button onclick='mudarPagina();' style='margin-top:10px;'>Mudar Página</button>"
     "  <p style='font-size:1em; color:#888;'>Pressione o botão A para alternar a leitura exibida</p>"
     "</div>"
     "<hr style='margin-top: 20px;'>"
@@ -141,7 +146,12 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
     char req[1024] = {0};
     pbuf_copy_partial(p, req, sizeof(req) - 1, 0);
 
-    struct http_state hs;
+    struct http_state *hs = malloc(sizeof(struct http_state));
+    if (!hs) {
+        pbuf_free(p);
+        tcp_close(tpcb);
+        return ERR_MEM;
+    }
 
     if (strstr(req, "POST /config")) {
         // Espera JSON: {"pagina":..., "lim_min":..., "lim_max":..., "offset":...}
@@ -176,11 +186,23 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
                 }
             }
         }
-        int len = snprintf(hs.response, sizeof(hs.response),
+        int len = snprintf(hs->response, sizeof(hs->response),
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
-        tcp_write(tpcb, hs.response, len, TCP_WRITE_FLAG_COPY);
+        tcp_write(tpcb, hs->response, len, TCP_WRITE_FLAG_COPY);
         tcp_output(tpcb);
         pbuf_free(p);
+        free(hs);
+        return ERR_OK;
+    } else if (strstr(req, "POST /pagina")) {
+        // Alterna a página exibida
+        pagina_atual = (pagina_atual + 1) % 5;
+        printf("Página alterada via HTTP: %d\n", pagina_atual);
+        int len = snprintf(hs->response, sizeof(hs->response),
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        tcp_write(tpcb, hs->response, len, TCP_WRITE_FLAG_COPY);
+        tcp_output(tpcb);
+        pbuf_free(p);
+        free(hs);
         return ERR_OK;
     } else if (strstr(req, "GET /estado")) {
         // Leitura do BMP280
@@ -194,7 +216,7 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
 
         // Leitura do AHT20
         AHT20_Data data;
-        int aht_ok = aht20_read(i2c1, &data);
+        int aht_ok = aht20_read(i2c0, &data);
 
         // JSON para a leitura da página atual, incluindo histórico, limites e offset
         char historico_str[HIST_SIZE * 10] = "";
@@ -211,12 +233,20 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
         float lim_min = limites_min[pagina_atual];
         float lim_max = limites_max[pagina_atual];
         float offset = offsets[pagina_atual];
+        const char* unidade = "";
+        switch (pagina_atual) {
+            case 0: unidade = "kPa"; break;
+            case 1: unidade = "°C"; break;
+            case 2: unidade = "m"; break;
+            case 3: unidade = "°C"; break;
+            case 4: unidade = "%"; break;
+        }
 
         char json_payload[1024];
         int json_len = snprintf(json_payload, sizeof(json_payload),
-            "{\"pagina\":%d,\"nome\":\"%s\",\"valor\":%.2f,\"historico\":%s,\"lim_min\":%.2f,\"lim_max\":%.2f,\"offset\":%.2f}\r\n",
-            pagina_atual, nome, valor_atual, historico_str, lim_min, lim_max, offset);
-        int len = snprintf(hs.response, sizeof(hs.response),
+            "{\"pagina\":%d,\"nome\":\"%s\",\"valor\":%.2f,\"unidade\":\"%s\",\"historico\":%s,\"lim_min\":%.2f,\"lim_max\":%.2f,\"offset\":%.2f}\r\n",
+            pagina_atual, nome, valor_atual, unidade, historico_str, lim_min, lim_max, offset);
+        int len = snprintf(hs->response, sizeof(hs->response),
                            "HTTP/1.1 200 OK\r\n"
                            "Content-Type: application/json\r\n"
                            "Content-Length: %d\r\n"
@@ -224,12 +254,13 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
                            "\r\n"
                            "%s",
                            json_len, json_payload);
-        tcp_write(tpcb, hs.response, len, TCP_WRITE_FLAG_COPY);
+        tcp_write(tpcb, hs->response, len, TCP_WRITE_FLAG_COPY);
         tcp_output(tpcb);
         pbuf_free(p);
+        free(hs);
         return ERR_OK;
     } else {
-        int len = snprintf(hs.response, sizeof(hs.response),
+        int len = snprintf(hs->response, sizeof(hs->response),
                            "HTTP/1.1 200 OK\r\n"
                            "Content-Type: text/html\r\n"
                            "Content-Length: %d\r\n"
@@ -237,9 +268,10 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
                            "\r\n"
                            "%s",
                            (int)strlen(HTML_BODY), HTML_BODY);
-        tcp_write(tpcb, hs.response, len, TCP_WRITE_FLAG_COPY);
+        tcp_write(tpcb, hs->response, len, TCP_WRITE_FLAG_COPY);
         tcp_output(tpcb);
         pbuf_free(p);
+        free(hs);
         return ERR_OK;
     }
 }
@@ -293,6 +325,8 @@ void gpio_irq_handler(uint gpio, uint32_t events)
 int iniciar_wifi()
 {
     printf("Iniciando Wi-Fi...\n");
+    escrever(&ssd, "Iniciando...", 10, 2, cor);
+    ssd1306_fill(&ssd, false);
 
     if (cyw43_arch_init())
     {
@@ -304,6 +338,8 @@ int iniciar_wifi()
     if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASS, CYW43_AUTH_WPA2_AES_PSK, 10000))
     {
         printf("Erro ao conectar ao Wi-Fi\n");
+        escrever(&ssd, "Erro ao conectar", 10, 2, cor);
+        ssd1306_fill(&ssd, false);
         return 1;
     }
 
@@ -313,6 +349,10 @@ int iniciar_wifi()
 
     printf("Conectado ao Wi-Fi...\n");
     printf("IP: %s\n", ip_str);
+    escrever(&ssd, "IP:", 10, 5, cor);
+    escrever(&ssd, ip_str, 5, 25, cor);
+    ssd1306_fill(&ssd, false);
+    sleep_ms(1000); // Aguarda 1 segundo para exibir o IP
 }
 
 int main()
@@ -321,6 +361,7 @@ int main()
     iniciar_buzzer();
     controle(PINO_MATRIZ); // Inicializa a matriz de LEDs
     iniciar_botoes(); // Inicializa os botões
+    init_display(); // Inicializa o display OLED
 
     gpio_set_irq_enabled_with_callback(BOTAO_A, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
     gpio_set_irq_enabled_with_callback(BOTAO_B, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
@@ -343,11 +384,11 @@ int main()
     gpio_pull_up(1);
 
     // Inicializa o I2C1 (AHT20 nos pinos 2/3)
-    i2c_init(i2c1, 400 * 1000);
-    gpio_set_function(2, GPIO_FUNC_I2C); // SDA sensor
-    gpio_set_function(3, GPIO_FUNC_I2C); // SCL sensor
-    gpio_pull_up(2);
-    gpio_pull_up(3);
+    i2c_init(i2c0, 400 * 1000);
+    gpio_set_function(0, GPIO_FUNC_I2C); // SDA sensor
+    gpio_set_function(1, GPIO_FUNC_I2C); // SCL sensor
+    gpio_pull_up(0);
+    gpio_pull_up(1);
 
     // Inicializa o BMP280 no i2c0 (pinos 0 e 1)
     bmp280_init(i2c0);
@@ -355,8 +396,8 @@ int main()
     bmp280_get_calib_params(i2c0, &params);
 
     // Inicializa o AHT20 no i2c1 (pinos 2 e 3)
-    aht20_reset(i2c1);
-    aht20_init(i2c1);
+    aht20_reset(i2c0);
+    aht20_init(i2c0);
 
     // Estrutura para armazenar os dados do sensor
     AHT20_Data data;
@@ -379,7 +420,7 @@ int main()
         double altitude = calculate_altitude(pressure);
 
         // Leitura do AHT20 no i2c1 (pinos 2 e 3)
-        int aht_ok = aht20_read(i2c1, &data);
+        int aht_ok = aht20_read(i2c0, &data);
 
         // Armazenar valores no histórico, aplicando offset, mas só se leitura válida
         float valores[5];
@@ -393,6 +434,22 @@ int main()
             historico[i][historico_idx[i]] = valores[i];
             historico_idx[i] = (historico_idx[i] + 1) % HIST_SIZE;
         }
+
+        // Exibe no display o nome, valor e unidade da página atual
+        ssd1306_fill(&ssd, false); // Limpa display
+        const char* unidade = "";
+        switch (pagina_atual) {
+            case 0: unidade = "kPa"; break; // Pressão
+            case 1: unidade = "°C"; break; // Temperatura BMP280
+            case 2: unidade = "m"; break; // Altitude
+            case 3: unidade = "°C"; break; // Temperatura AHT20
+            case 4: unidade = "%"; break; // Umidade
+        }
+        char valor_str[32];
+        snprintf(valor_str, sizeof(valor_str), "%.2f %s", valores[pagina_atual], unidade);
+        escrever(&ssd, nomes_leituras[pagina_atual], 5, 10, cor); // Nome na linha de cima
+        escrever(&ssd, valor_str, 5, 30, cor); // Valor + unidade na linha de baixo
+        ssd1306_send_data(&ssd);
 
         // LED azul aceso se TODOS os parâmetros estão dentro dos limites
         // LED vermelho aceso se PELO MENOS UM estiver fora
