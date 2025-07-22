@@ -1,4 +1,4 @@
-# Estação Meteorológica Pico W
+# Estação Meteorológica
 
 Este projeto implementa uma estação meteorológica embarcada utilizando Raspberry Pi Pico W, sensores BMP280 e AHT20, display OLED, LEDs, buzzer, matriz de LEDs e interface web para monitoramento e configuração.
 
@@ -40,9 +40,6 @@ Este projeto implementa uma estação meteorológica embarcada utilizando Raspbe
 - Permite configurar limites e offset de cada sensor.
 - Exibe gráfico do histórico.
 - Botão para alternar página de leitura.
-
-## Licença
-Este projeto é distribuído sob a licença MIT.
 
 ## Autor
 Atenilton Santos de Souza Júnior
